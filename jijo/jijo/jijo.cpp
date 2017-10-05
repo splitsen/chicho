@@ -23,11 +23,26 @@ namespace po = boost::program_options;
 namespace fs = std::experimental::filesystem;
 using namespace std;
 
+string gen_random(const int len) {
+    static const char alphanum[] =
+        "0123456789"
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        "abcdefghijklmnopqrstuvwxyz";
+
+    string s;
+    s.reserve(len);
+    for (int i = 0; i < len; ++i) {
+        s[i] = alphanum[rand() % (sizeof(alphanum) - 1)];
+    }
+
+    return s;
+}
+
 int main(int ac, char* av[])
 {
     try {
 
-        size_t chunk, depth, dir_count, file_count;
+        size_t chunk, depth, dir_count, file_count, name_length;
         string target_dir;
         po::options_description desc("Allowed options");
         desc.add_options()
@@ -37,6 +52,7 @@ int main(int ac, char* av[])
             ("dir_count", po::value<size_t>(&dir_count)->default_value(10), "Directories count per depth level.")
             ("file_count", po::value<size_t>(&file_count)->default_value(10), "Files count count per directory.")
             ("target", po::value<string>(&target_dir)->default_value("."), "Generate in that directory, default is current.")
+            ("name_length", po::value<size_t>(&name_length)->default_value(5), "Directory/file name length.")
             ;
 
         po::variables_map vm;
@@ -47,6 +63,22 @@ int main(int ac, char* av[])
             cout << desc << "\n";
             return 0;
         }
+
+        fs::directory_entry root(fs::path(target_dir));
+        for (size_t h = 0; h < dir_count; h++)
+            h_path
+            for (size_t v = 0; v < depth; v++)
+            {
+                string name = gen_random(name_length);
+                fs::path = current
+                bool exists(const std::filesystem::path& p, std::error_code& ec)
+                fs::create_directory(name);
+                for (size_t f = 0; f < file_count; f++)
+                {
+
+                }
+
+            }
 
         for (auto& p : fs::recursive_directory_iterator(target_dir))
             std::cout << p << '\n';
