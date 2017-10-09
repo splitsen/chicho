@@ -18,8 +18,8 @@ namespace po = boost::program_options;
 
 #include <iostream>
 #include <iterator>
-
 #include <fstream>
+#include <iomanip>
 
 namespace fs = std::experimental::filesystem;
 using namespace std;
@@ -105,7 +105,7 @@ int main(int ac, char* av[])
         if (cfg.Help())
             return 0;
 
-        const std::chrono::system_clock::time_point start = std::chrono::system_clock::now();
+        const auto start = steady_clock::now();
 
         size_t dir_count = 0;
         size_t files_count = 0;
@@ -122,7 +122,7 @@ int main(int ac, char* av[])
             for (size_t v = 0; v < cfg.depth; v++)
             {
                 fs::path new_dir = target_dir / to_string(gen_random(cfg.name_length));
-                std::error_code ec;
+                error_code ec;
                 size_t count = 0;
                 while (exists(new_dir, ec))
                 {
@@ -138,7 +138,7 @@ int main(int ac, char* av[])
                 for (size_t f = 0; f < cfg.file_count; f++)
                 {
                     fs::path new_file = new_dir / to_string(gen_random(cfg.name_length));
-                    std::error_code ec;
+                    error_code ec;
                     size_t count = 0;
                     while (exists(new_file, ec))
                     {
@@ -149,7 +149,7 @@ int main(int ac, char* av[])
                         }
                         new_file = target_dir / to_string(gen_random(cfg.name_length));
                     }
-                    std::ofstream file(new_file);
+                    ofstream file(new_file);
                     files_count++;
 
                     size_t i = 0;
@@ -164,13 +164,11 @@ int main(int ac, char* av[])
                 }
             }
 
-        auto i = 10 % 60;
-        auto j = 75 % 60;
-            const auto elapsed = duration_cast<seconds>(system_clock::now() -start).count();
-        auto minutes = elapsed % 60;
-        auto secs = elapsed - 60 * minutes;
+        auto elapsed = (steady_clock::now() - start);
+        minutes mm = duration_cast<minutes>(elapsed);
+        seconds ss = duration_cast<seconds>(elapsed % minutes(1));
         cout << files_count << " files in " << dir_count << " directories in " <<
-            minutes << "mns " << secs << " secs" << endl;
+            setfill('0') << setw(2) << mm.count() << " mns " << setw(2) << ss.count() << " secs" << endl;
     }
     catch (exception& e) {
         cerr << "error: " << e.what() << "\n";
