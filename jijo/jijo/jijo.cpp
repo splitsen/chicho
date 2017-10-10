@@ -2,6 +2,16 @@
 // C:\dev\boost_1_65_1>bootstrap.bat
 // C:\dev\boost_1_65_1>bjam.exe --build-type=minimal msvc stage --with-program_options address-model=64
 
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0501
+#endif
+#define BOOST_DATE_TIME_NO_LIB
+#define BOOST_REGEX_NO_LIB
+//#define BOOST_ERROR_CODE_HEADER_ONLY
+//#include <boost/system/error_code.hpp>
+//#include <boost/asio.hpp>
+#include <asio.hpp>
+
 #include <chrono>
 
 #include <boost/program_options.hpp>
@@ -10,10 +20,10 @@ namespace po = boost::program_options;
 #include <iostream>
 #include <fstream>
 #include <iomanip>
-
+#include <thread>
 #include <filesystem>
-namespace fs = std::experimental::filesystem;
 
+namespace fs = std::experimental::filesystem;
 using namespace std;
 using namespace std::chrono;
 
@@ -44,7 +54,8 @@ struct Config
     {}
 
     bool is_help;
-    size_t chunk, depth, dir_count, file_count, name_length, file_length;
+    size_t chunk, depth, dir_count, file_count, name_length, file_length,
+        thread_pool;
     string target_dir, file_ext;
     bool chunk_reused;
 
@@ -56,6 +67,7 @@ struct Config
 
 Config Get_config(int ac, char* av[])
 {
+    size_t HW_cores = thread::hardware_concurrency();
     Config cfg;
     po::options_description desc("Allowed options");
     desc.add_options()
@@ -83,6 +95,8 @@ Config Get_config(int ac, char* av[])
             "File length.")
         ("file_ext", po::value<string>(&cfg.file_ext)->default_value("rdm"),
             "File extension.")
+        ("thread_pool", po::value<size_t>(&cfg.thread_pool)->default_value(HW_cores),
+            "thread pool size, default to count of HW concurrent threads.")
         ;
 
     po::variables_map vm;
@@ -97,7 +111,7 @@ Config Get_config(int ac, char* av[])
     return cfg;
 }
 
-class Chicho
+class Chicho : private boost::noncopyable
 {
     size_t _dir_count = 0;
     size_t _files_count = 0;
@@ -105,13 +119,15 @@ class Chicho
     fs::path _target_dir;
     const chrono::time_point<steady_clock> _start;
     vector<char> _buffer;
+    asio::io_service& _io_service;
 
 public:
-    Chicho(const Config& cfg)
+    Chicho(const Config& cfg, asio::io_service& io_service)
         :_dir_count(0)
         ,_files_count(0)
         ,_cfg(cfg)
         ,_start(steady_clock::now())
+        ,_io_service(io_service)
     {
         _target_dir = cfg.target_dir;
         std::error_code ec;
@@ -131,6 +147,23 @@ public:
         std::cout << _files_count << " files in " << _dir_count << " directories in " <<
             setfill('0') << setw(2) << mm.count() << " mns " << setw(2) << ss.count() << "." << setw(3) << ms.count() << " secs" <<
             endl;
+    }
+
+    void run()
+    {
+        Chicho& chicho = *this;
+        vector<fs::path> end_paths = generate(_cfg.target_dir);
+        for (size_t v = 1; v < _cfg.depth; v++)
+        {
+            vector<fs::path> new_end_paths;
+            for_each(end_paths.begin(), end_paths.end(),
+                [&chicho, &new_end_paths](const fs::path& ipath)
+            {
+                vector<fs::path> generated = chicho.generate(ipath);
+                new_end_paths.insert(new_end_paths.end(), generated.begin(), generated.end());
+            });
+            end_paths = new_end_paths;
+        }
     }
 
     fs::path new_file_name(const fs::path& parent) const
@@ -228,20 +261,21 @@ int main(int ac, char* av[])
         if (cfg.Help())
             return 0;
 
-        Chicho chicho(cfg);
-
-        vector<fs::path> end_paths = chicho.generate(cfg.target_dir);
-        for (size_t v = 1; v < cfg.depth; v++)
+        // Create a pool of threads to run all of the io_services.
+        /// The io_service used to perform asynchronous operations.
+        asio::io_service io_service;
+        Chicho chicho(cfg, io_service);
+        std::vector<shared_ptr<thread> > threads;
+        for (std::size_t i = 0; i < cfg.thread_pool; ++i)
         {
-            vector<fs::path> new_end_paths;
-            for_each(end_paths.begin(), end_paths.end(),
-                [&chicho, &new_end_paths](const fs::path& ipath)
-            {
-                vector<fs::path> generated = chicho.generate(ipath);
-                new_end_paths.insert(new_end_paths.end(), generated.begin(), generated.end());
-            });
-            end_paths = new_end_paths;
+            shared_ptr<thread> thread(new thread(
+                [&io_service]() {io_service.run(); }));
+            threads.push_back(thread);
         }
+
+        // Wait for all threads in the pool to exit.
+        for (std::size_t i = 0; i < threads.size(); ++i)
+            threads[i]->join();
     }
     catch (exception& e) {
         cerr << "error: " << e.what() << "\n";
