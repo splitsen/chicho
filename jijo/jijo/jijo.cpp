@@ -46,7 +46,7 @@ struct Config
     bool is_help;
     size_t chunk, depth, dir_count, file_count, name_length, file_length;
     string target_dir, file_ext;
-    bool _chunk_reused;
+    bool chunk_reused;
 
     bool Help() const
     {
@@ -69,7 +69,7 @@ Config Get_config(int ac, char* av[])
             "Files are filled with a buffer of random character, the size of this buffer if the chunk size.\n"
             "Chunk allows to set RAM memory impact versus number of calls to the OS write file API"
             )
-        ("chunk_reused", po::value<bool>(&cfg._chunk_reused)->default_value(false),
+        ("chunk_reused", po::value<bool>(&cfg.chunk_reused)->default_value(false),
             "Use the same chunk for all files.")
         ("depth", po::value<size_t>(&cfg.depth)->default_value(3),
             "Directories depth.")
@@ -104,6 +104,7 @@ class Chicho
     const Config& _cfg;
     fs::path _target_dir;
     const chrono::time_point<steady_clock> _start;
+    vector<char> _buffer;
 
 public:
     Chicho(const Config& cfg)
@@ -126,8 +127,10 @@ public:
         auto elapsed = (steady_clock::now() - _start);
         minutes mm = duration_cast<minutes>(elapsed);
         seconds ss = duration_cast<seconds>(elapsed % minutes(1));
+        milliseconds ms = duration_cast<milliseconds>(elapsed % seconds(1));
         std::cout << _files_count << " files in " << _dir_count << " directories in " <<
-            setfill('0') << setw(2) << mm.count() << " mns " << setw(2) << ss.count() << " secs" << endl;
+            setfill('0') << setw(2) << mm.count() << " mns " << setw(2) << ss.count() << "." << setw(3) << ms.count() << " secs" <<
+            endl;
     }
 
     fs::path new_file_name(const fs::path& parent) const
@@ -135,6 +138,17 @@ public:
         fs::path new_file = parent / to_string(gen_random(_cfg.name_length));
         new_file += "." + _cfg.file_ext;
         return new_file;
+    }
+
+    vector<char> get_chunck(size_t len=0)
+    {
+        if(!_cfg.chunk_reused)
+            return gen_random(len ? len : _cfg.chunk);
+        if( _buffer.empty())
+            _buffer = gen_random(_cfg.chunk);
+        if(!len || len == _cfg.chunk)
+            return _buffer;
+        return gen_random(len);
     }
 
     fs::path create_directory_and_files(
@@ -181,13 +195,15 @@ public:
             auto& chunk = _cfg.chunk;
             for (; i < file_length % chunk; i++)
             {
-                vector<char> v = gen_random(chunk);
+                vector<char> v = get_chunck();
                 file.write(&v[0], v.size());
             }
-            vector<char> v = gen_random(chunk > file_length ? 
-                file_length : (file_length - i * chunk));
-            if (!v.empty())
+            const size_t fillup = file_length - i * chunk;
+            if (fillup)
+            {
+                vector<char> v = get_chunck(file_length - i * chunk);
                 file.write(&v[0], v.size());
+            }
         }
 
         return new_dir;
