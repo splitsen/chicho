@@ -1,27 +1,15 @@
-// Including SDKDDKVer.h defines the highest available Windows platform.
-
-// If you wish to build your application for a previous Windows platform, include WinSDKVer.h and
-// set the _WIN32_WINNT macro to the platform you wish to support before including SDKDDKVer.h.
-
-// boost::program_options must be built:
-// C:\dev\boost_1_65_1>bootstrap.bat
-// C:\dev\boost_1_65_1>bjam.exe --build-type=complete msvc stage --with-program_options address-model=64
-#include <SDKDDKVer.h>
-#include <stdio.h>
-#include <tchar.h>
-
-#include <filesystem>
 #include <chrono>
 
 #include <boost/program_options.hpp>
 namespace po = boost::program_options;
 
 #include <iostream>
-#include <iterator>
 #include <fstream>
 #include <iomanip>
 
+#include <filesystem>
 namespace fs = std::experimental::filesystem;
+
 using namespace std;
 using namespace std::chrono;
 
@@ -66,7 +54,7 @@ Config Get_config(int ac, char* av[])
     Config cfg;
     po::options_description desc("Allowed options");
     desc.add_options()
-        ("help", "Directories and files generator.")
+        ("help,h", "Directories and files generator.")
         ("chunk", po::value<size_t>(&cfg.chunk)->default_value(1048),
             "Chunk size.")
         ("depth", po::value<size_t>(&cfg.depth)->default_value(3),
@@ -97,118 +85,128 @@ Config Get_config(int ac, char* av[])
     return cfg;
 }
 
-fs::path create_directory_and_files(
-    fs::path parent, 
-    size_t name_length, // length name of dir and file
-    size_t file_count,
-    size_t file_length,
-    size_t chunk_size)
+class Chicho
 {
-    fs::path new_dir = parent / to_string(gen_random(name_length));
-    error_code ec;
-    size_t count = 0;
-    while (exists(new_dir, ec))
+    size_t _dir_count = 0;
+    size_t _files_count = 0;
+    const Config& _cfg;
+    fs::path _target_dir;
+    const chrono::time_point<steady_clock> _start;
+
+public:
+    Chicho(const Config& cfg)
+        :_dir_count(0)
+        ,_files_count(0)
+        ,_cfg(cfg)
+        ,_start(steady_clock::now())
     {
-        if (++count > 10)
+        _target_dir = cfg.target_dir;
+        std::error_code ec;
+        if (!exists(_target_dir, ec))
         {
-            stringstream ss;
-            ss << "Unable to generate a new directory name (" << new_dir << ")";
-            throw runtime_error(ss.str());
+            fs::create_directory(_target_dir);
+            _dir_count++;
         }
-        new_dir = parent / to_string(gen_random(name_length));
     }
 
-    fs::create_directory(new_dir);
-
-    // files generation
-    for (size_t f = 0; f < file_count; f++)
+    ~Chicho()
     {
-        fs::path new_file = new_dir / to_string(gen_random(name_length));
+        auto elapsed = (steady_clock::now() - _start);
+        minutes mm = duration_cast<minutes>(elapsed);
+        seconds ss = duration_cast<seconds>(elapsed % minutes(1));
+        std::cout << _files_count << " files in " << _dir_count << " directories in " <<
+            setfill('0') << setw(2) << mm.count() << " mns " << setw(2) << ss.count() << " secs" << endl;
+    }
+
+    fs::path create_directory_and_files(
+        fs::path parent,
+        const Config& cfg)
+    {
+        fs::path new_dir = parent / to_string(gen_random(cfg.name_length));
         error_code ec;
         size_t count = 0;
-        while (exists(new_file, ec))
+        while (exists(new_dir, ec))
         {
             if (++count > 10)
             {
                 stringstream ss;
-                ss << "Unable to generate a new file name (" << new_file << ")";
+                ss << "Unable to generate a new directory name (" << new_dir << ")";
                 throw runtime_error(ss.str());
             }
-            new_file = new_dir / to_string(gen_random(name_length));
+            new_dir = parent / to_string(gen_random(cfg.name_length));
         }
-        ofstream file(new_file);
 
-        size_t i = 0;
-        for (; i < file_length % chunk_size; i++)
+        fs::create_directory(new_dir);
+        _dir_count++;
+
+        // files generation
+        for (size_t f = 0; f < cfg.file_count; f++)
         {
-            vector<char> v = gen_random(chunk_size);
-            file.write(&v[0], v.size());
+            fs::path new_file = new_dir / to_string(gen_random(cfg.name_length));
+            error_code ec;
+            size_t count = 0;
+            while (exists(new_file, ec))
+            {
+                if (++count > 10)
+                {
+                    stringstream ss;
+                    ss << "Unable to generate a new file name (" << new_file << ")";
+                    throw runtime_error(ss.str());
+                }
+                new_file = new_dir / to_string(gen_random(cfg.name_length));
+            }
+            ofstream file(new_file);
+            _files_count++;
+
+            size_t i = 0;
+            for (; i < cfg.file_length % cfg.chunk; i++)
+            {
+                vector<char> v = gen_random(cfg.chunk);
+                file.write(&v[0], v.size());
+            }
+            vector<char> v = gen_random(cfg.chunk > cfg.file_length ? 
+                cfg.file_length : (cfg.file_length - i * cfg.chunk));
+            if (!v.empty())
+                file.write(&v[0], v.size());
         }
-        vector<char> v = gen_random(chunk_size > file_length ? file_length : (file_length - i * chunk_size));
-        if (!v.empty())
-            file.write(&v[0], v.size());
+
+        return new_dir;
     }
 
-    return new_dir;
-}
-
-vector<fs::path> generate(
-    const Config& cfg, 
-    const fs::path& parent)
-{
-    vector<fs::path> end_paths;
-    for (size_t h = 0; h < cfg.dir_count; h++)
+    vector<fs::path> generate(
+        const fs::path& parent)
     {
-        fs::path generated = create_directory_and_files(
-            parent,
-            cfg.name_length, // length name of dir and file
-            cfg.file_count,
-            cfg.file_length,
-            cfg.chunk);
-        end_paths.push_back(generated);
+        vector<fs::path> end_paths;
+        for (size_t h = 0; h < _cfg.dir_count; h++)
+        {
+            fs::path generated = create_directory_and_files(parent, _cfg);
+            end_paths.push_back(generated);
+        }
+        return end_paths;
     }
-    return end_paths;
-}
+};
 
 int main(int ac, char* av[])
 {
     try {
-
         const Config cfg = Get_config(ac, av);
         if (cfg.Help())
             return 0;
 
-        const auto start = steady_clock::now();
+        Chicho chicho(cfg);
 
-        size_t dir_count = 0;
-        size_t files_count = 0;
-
-        fs::path target_dir = cfg.target_dir;
-        std::error_code ec;
-        if (!exists(target_dir, ec))
-        {
-            fs::create_directory(target_dir);
-            dir_count++;
-        }
-
-        vector<fs::path> end_paths = generate(cfg, target_dir);
+        vector<fs::path> end_paths = chicho.generate(cfg.target_dir);
         for (size_t v = 1; v < cfg.depth; v++)
         {
             vector<fs::path> new_end_paths;
             for_each(end_paths.begin(), end_paths.end(),
-                [&cfg, &new_end_paths](const fs::path& ipath)
+                [&chicho, &new_end_paths](const fs::path& ipath)
             {
-                vector<fs::path> generated = generate(cfg, ipath);
+                vector<fs::path> generated = chicho.generate(ipath);
                 new_end_paths.insert(new_end_paths.end(), generated.begin(), generated.end());
             });
             end_paths = new_end_paths;
         }
-
-        auto elapsed = (steady_clock::now() - start);
-        minutes mm = duration_cast<minutes>(elapsed);
-        seconds ss = duration_cast<seconds>(elapsed % minutes(1));
-        std::cout << files_count << " files in " << dir_count << " directories in " <<
-            setfill('0') << setw(2) << mm.count() << " mns " << setw(2) << ss.count() << " secs" << endl;
     }
     catch (exception& e) {
         cerr << "error: " << e.what() << "\n";
