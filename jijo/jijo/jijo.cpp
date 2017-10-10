@@ -1,3 +1,7 @@
+// boost::program_options must be built:
+// C:\dev\boost_1_65_1>bootstrap.bat
+// C:\dev\boost_1_65_1>bjam.exe --build-type=minimal msvc stage --with-program_options address-model=64
+
 #include <chrono>
 
 #include <boost/program_options.hpp>
@@ -42,6 +46,7 @@ struct Config
     bool is_help;
     size_t chunk, depth, dir_count, file_count, name_length, file_length;
     string target_dir, file_ext;
+    bool _chunk_reused;
 
     bool Help() const
     {
@@ -57,13 +62,15 @@ Config Get_config(int ac, char* av[])
         ("help,h", "Produce this help message.")
         ("target", po::value<string>(&cfg.target_dir)->default_value("."),
             "Generate in that directory, default is current, if not exist create.\n"
-            "chicho does not add or modify an existing directory"
+            "chicho does not add or modify an existing directory."
             )
         ("chunk", po::value<size_t>(&cfg.chunk)->default_value(1048),
             "Chunk size.\n"
             "Files are filled with a buffer of random character, the size of this buffer if the chunk size.\n"
             "Chunk allows to set RAM memory impact versus number of calls to the OS write file API"
             )
+        ("chunk_reused", po::value<bool>(&cfg._chunk_reused)->default_value(false),
+            "Use the same chunk for all files.")
         ("depth", po::value<size_t>(&cfg.depth)->default_value(3),
             "Directories depth.")
         ("dir_count", po::value<size_t>(&cfg.dir_count)->default_value(3),
@@ -123,11 +130,17 @@ public:
             setfill('0') << setw(2) << mm.count() << " mns " << setw(2) << ss.count() << " secs" << endl;
     }
 
-    fs::path create_directory_and_files(
-        fs::path parent,
-        const Config& cfg)
+    fs::path new_file_name(const fs::path& parent) const
     {
-        fs::path new_dir = parent / to_string(gen_random(cfg.name_length));
+        fs::path new_file = parent / to_string(gen_random(_cfg.name_length));
+        new_file += "." + _cfg.file_ext;
+        return new_file;
+    }
+
+    fs::path create_directory_and_files(
+        fs::path parent)
+    {
+        fs::path new_dir = parent / to_string(gen_random(_cfg.name_length));
         error_code ec;
         size_t count = 0;
         while (exists(new_dir, ec))
@@ -138,16 +151,16 @@ public:
                 ss << "Unable to generate a new directory name (" << new_dir << ")";
                 throw runtime_error(ss.str());
             }
-            new_dir = parent / to_string(gen_random(cfg.name_length));
+            new_dir = parent / to_string(gen_random(_cfg.name_length));
         }
 
         fs::create_directory(new_dir);
         _dir_count++;
 
         // files generation
-        for (size_t f = 0; f < cfg.file_count; f++)
+        for (size_t f = 0; f < _cfg.file_count; f++)
         {
-            fs::path new_file = new_dir / to_string(gen_random(cfg.name_length));
+            fs::path new_file = new_file_name(new_dir);
             error_code ec;
             size_t count = 0;
             while (exists(new_file, ec))
@@ -158,19 +171,21 @@ public:
                     ss << "Unable to generate a new file name (" << new_file << ")";
                     throw runtime_error(ss.str());
                 }
-                new_file = new_dir / to_string(gen_random(cfg.name_length));
+                fs::path new_file = new_file_name(new_dir);
             }
             ofstream file(new_file);
             _files_count++;
 
             size_t i = 0;
-            for (; i < cfg.file_length % cfg.chunk; i++)
+            auto& file_length = _cfg.file_length;
+            auto& chunk = _cfg.chunk;
+            for (; i < file_length % chunk; i++)
             {
-                vector<char> v = gen_random(cfg.chunk);
+                vector<char> v = gen_random(chunk);
                 file.write(&v[0], v.size());
             }
-            vector<char> v = gen_random(cfg.chunk > cfg.file_length ? 
-                cfg.file_length : (cfg.file_length - i * cfg.chunk));
+            vector<char> v = gen_random(chunk > file_length ? 
+                file_length : (file_length - i * chunk));
             if (!v.empty())
                 file.write(&v[0], v.size());
         }
@@ -178,13 +193,12 @@ public:
         return new_dir;
     }
 
-    vector<fs::path> generate(
-        const fs::path& parent)
+    vector<fs::path> generate(const fs::path& parent)
     {
         vector<fs::path> end_paths;
         for (size_t h = 0; h < _cfg.dir_count; h++)
         {
-            fs::path generated = create_directory_and_files(parent, _cfg);
+            fs::path generated = create_directory_and_files(parent);
             end_paths.push_back(generated);
         }
         return end_paths;
