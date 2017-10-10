@@ -54,17 +54,22 @@ Config Get_config(int ac, char* av[])
     Config cfg;
     po::options_description desc("Allowed options");
     desc.add_options()
-        ("help,h", "Directories and files generator.")
+        ("help,h", "Produce this help message.")
+        ("target", po::value<string>(&cfg.target_dir)->default_value("."),
+            "Generate in that directory, default is current, if not exist create.\n"
+            "chicho does not add or modify an existing directory"
+            )
         ("chunk", po::value<size_t>(&cfg.chunk)->default_value(1048),
-            "Chunk size.")
+            "Chunk size.\n"
+            "Files are filled with a buffer of random character, the size of this buffer if the chunk size.\n"
+            "Chunk allows to set RAM memory impact versus number of calls to the OS write file API"
+            )
         ("depth", po::value<size_t>(&cfg.depth)->default_value(3),
             "Directories depth.")
         ("dir_count", po::value<size_t>(&cfg.dir_count)->default_value(3),
             "Directories count per depth level.")
         ("file_count", po::value<size_t>(&cfg.file_count)->default_value(5),
             "Files count count per directory.")
-        ("target", po::value<string>(&cfg.target_dir)->default_value("."),
-            "Generate in that directory, default is current, if not exist create.")
         ("name_length", po::value<size_t>(&cfg.name_length)->default_value(5),
             "Directory/file name length.")
         ("file_length", po::value<size_t>(&cfg.file_length)->default_value(1049),
