@@ -261,17 +261,31 @@ int main(int ac, char* av[])
         if (cfg.Help())
             return 0;
 
+        asio::io_service io_service;
+
+        // Register to handle the signals that indicate when the server should exit.
+        // It is safe to register for the same signal multiple times in a program,
+        // provided all registration for the specified signal is made through Asio.
+        asio::signal_set signals(io_service);
+        signals.add(SIGINT);
+        signals.add(SIGTERM);
+#if defined(SIGQUIT)
+        signals.add(SIGQUIT);
+#endif // defined(SIGQUIT)
+        signals.async_wait([&io_service](
+            const std::error_code&, // Result of operation.
+            int signal_number // Indicates which signal occurred.
+            ) {io_service.stop();});
+
+        Chicho chicho(cfg, io_service);
+        chicho.run();
+
         // Create a pool of threads to run all of the io_services.
         /// The io_service used to perform asynchronous operations.
-        asio::io_service io_service;
-        Chicho chicho(cfg, io_service);
         std::vector<shared_ptr<thread> > threads;
         for (std::size_t i = 0; i < cfg.thread_pool; ++i)
-        {
-            shared_ptr<thread> thread(new thread(
+            threads.push_back( make_shared<thread>(
                 [&io_service]() {io_service.run(); }));
-            threads.push_back(thread);
-        }
 
         // Wait for all threads in the pool to exit.
         for (std::size_t i = 0; i < threads.size(); ++i)
