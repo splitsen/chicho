@@ -7,9 +7,6 @@
 #endif
 #define BOOST_DATE_TIME_NO_LIB
 #define BOOST_REGEX_NO_LIB
-//#define BOOST_ERROR_CODE_HEADER_ONLY
-//#include <boost/system/error_code.hpp>
-//#include <boost/asio.hpp>
 #include <asio.hpp>
 
 #include <chrono>
@@ -21,6 +18,8 @@ namespace po = boost::program_options;
 #include <fstream>
 #include <iomanip>
 #include <thread>
+#include <mutex>
+#include <shared_mutex>
 #include <filesystem>
 
 namespace fs = std::experimental::filesystem;
@@ -113,13 +112,40 @@ Config Get_config(int ac, char* av[])
 
 class Chicho : private boost::noncopyable
 {
+    mutable std::shared_mutex _dir_count_mutex;
     size_t _dir_count = 0;
+    mutable std::shared_mutex _files_count_mutex;
     size_t _files_count = 0;
     const Config& _cfg;
     fs::path _target_dir;
     const chrono::time_point<steady_clock> _start;
     vector<char> _buffer;
     asio::io_service& _io_service;
+    asio::strand _strand;
+
+    void inc_dir_count()
+    {
+        unique_lock<shared_mutex> lock(_dir_count_mutex);
+        _dir_count++;
+    }
+
+    size_t get_dir_count()
+    {
+        shared_lock<shared_mutex> lock(_dir_count_mutex);
+        return _dir_count;
+    }
+
+    void inc_files_count()
+    {
+        unique_lock<shared_mutex> lock(_files_count_mutex);
+        _files_count++;
+    }
+
+    size_t get_files_count()
+    {
+        shared_lock<shared_mutex> lock(_files_count_mutex);
+        return _files_count;
+    }
 
 public:
     Chicho(const Config& cfg, asio::io_service& io_service)
@@ -128,13 +154,14 @@ public:
         ,_cfg(cfg)
         ,_start(steady_clock::now())
         ,_io_service(io_service)
+        , _strand(io_service)
     {
         _target_dir = cfg.target_dir;
         std::error_code ec;
         if (!exists(_target_dir, ec))
         {
             fs::create_directory(_target_dir);
-            _dir_count++;
+            inc_dir_count();
         }
     }
 
@@ -144,22 +171,31 @@ public:
         minutes mm = duration_cast<minutes>(elapsed);
         seconds ss = duration_cast<seconds>(elapsed % minutes(1));
         milliseconds ms = duration_cast<milliseconds>(elapsed % seconds(1));
-        std::cout << _files_count << " files in " << _dir_count << " directories in " <<
+        std::cout << get_files_count() << " files in " << get_dir_count() << " directories in " <<
             setfill('0') << setw(2) << mm.count() << " mns " << setw(2) << ss.count() << "." << setw(3) << ms.count() << " secs" <<
             endl;
     }
 
     void run()
     {
+        _strand.dispatch([this]() {
+            vector<fs::path> end_paths = generate(_cfg.target_dir);
+            browse(end_paths);
+        });
+    }
+
+    void browse(vector<fs::path> end_paths)
+    {
         Chicho& chicho = *this;
-        vector<fs::path> end_paths = generate(_cfg.target_dir);
-        for (size_t v = 1; v < _cfg.depth; v++)
+        for (size_t v = 1; v < _cfg.depth && !_io_service.stopped(); v++)
         {
             vector<fs::path> new_end_paths;
             for_each(end_paths.begin(), end_paths.end(),
-                [&chicho, &new_end_paths](const fs::path& ipath)
+                [this, &new_end_paths](const fs::path& ipath)
             {
-                vector<fs::path> generated = chicho.generate(ipath);
+                if (_io_service.stopped())
+                    return;
+                vector<fs::path> generated = generate(ipath);
                 new_end_paths.insert(new_end_paths.end(), generated.begin(), generated.end());
             });
             end_paths = new_end_paths;
@@ -202,18 +238,26 @@ public:
         }
 
         fs::create_directory(new_dir);
-        _dir_count++;
+        inc_dir_count();
 
-        // files generation
-        for (size_t f = 0; f < _cfg.file_count; f++)
+        _io_service.post([this, new_dir]() {
+                this->file_generation(new_dir); });
+
+        return new_dir;
+    }
+
+    void file_generation(fs::path new_dir)
+    {
+        for (size_t f = 0; f < _cfg.file_count && !_io_service.stopped(); f++)
         {
             fs::path new_file = new_file_name(new_dir);
             error_code ec;
             size_t count = 0;
-            while (exists(new_file, ec))
+            while (exists(new_file, ec) && !_io_service.stopped())
             {
                 if (++count > 10)
                 {
+                    _io_service.stop();
                     stringstream ss;
                     ss << "Unable to generate a new file name (" << new_file << ")";
                     throw runtime_error(ss.str());
@@ -221,16 +265,18 @@ public:
                 fs::path new_file = new_file_name(new_dir);
             }
             ofstream file(new_file);
-            _files_count++;
+            inc_files_count();
 
             size_t i = 0;
             auto& file_length = _cfg.file_length;
             auto& chunk = _cfg.chunk;
-            for (; i < file_length % chunk; i++)
+            for (; i < (file_length % chunk) && !_io_service.stopped(); i++)
             {
                 vector<char> v = get_chunck();
                 file.write(&v[0], v.size());
             }
+            if (_io_service.stopped())
+                return;
             const size_t fillup = file_length - i * chunk;
             if (fillup)
             {
@@ -238,21 +284,29 @@ public:
                 file.write(&v[0], v.size());
             }
         }
-
-        return new_dir;
     }
 
     vector<fs::path> generate(const fs::path& parent)
     {
         vector<fs::path> end_paths;
-        for (size_t h = 0; h < _cfg.dir_count; h++)
+        for (size_t h = 0; h < _cfg.dir_count && !_io_service.stopped(); h++)
         {
             fs::path generated = create_directory_and_files(parent);
+            if (_io_service.stopped())
+                break;
             end_paths.push_back(generated);
         }
         return end_paths;
     }
 };
+
+asio::io_service* g_io_service = nullptr;
+void sig_handler(int param)
+{
+    if (!g_io_service)
+        return;
+    g_io_service->stop();
+}
 
 int main(int ac, char* av[])
 {
@@ -262,20 +316,15 @@ int main(int ac, char* av[])
             return 0;
 
         asio::io_service io_service;
+        g_io_service = &io_service;
 
         // Register to handle the signals that indicate when the server should exit.
-        // It is safe to register for the same signal multiple times in a program,
-        // provided all registration for the specified signal is made through Asio.
-        asio::signal_set signals(io_service);
-        signals.add(SIGINT);
-        signals.add(SIGTERM);
+        g_io_service = &io_service;
+        signal(SIGINT, sig_handler);
+        signal(SIGTERM, sig_handler);
 #if defined(SIGQUIT)
-        signals.add(SIGQUIT);
+        signal(SIGQUIT, sig_handler);
 #endif // defined(SIGQUIT)
-        signals.async_wait([&io_service](
-            const std::error_code&, // Result of operation.
-            int signal_number // Indicates which signal occurred.
-            ) {io_service.stop();});
 
         Chicho chicho(cfg, io_service);
         chicho.run();
