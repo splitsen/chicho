@@ -8,6 +8,7 @@
 #define BOOST_DATE_TIME_NO_LIB
 #define BOOST_REGEX_NO_LIB
 #include <asio.hpp>
+#include <asio/steady_timer.hpp>
 
 #include <chrono>
 
@@ -112,16 +113,19 @@ Config Get_config(int ac, char* av[])
 
 class Chicho : private boost::noncopyable
 {
-    mutable std::shared_mutex _dir_count_mutex;
+    mutable shared_mutex _dir_count_mutex;
     size_t _dir_count = 0;
-    mutable std::shared_mutex _files_count_mutex;
+
+    mutable shared_mutex _files_count_mutex;
     size_t _files_count = 0;
+
     const Config& _cfg;
     fs::path _target_dir;
     const chrono::time_point<steady_clock> _start;
     vector<char> _buffer;
-    asio::io_service& _io_service;
     asio::strand _strand;
+    chrono::seconds _verbose_period;
+    asio::steady_timer _verbose_timer;
 
     void inc_dir_count()
     {
@@ -129,7 +133,7 @@ class Chicho : private boost::noncopyable
         _dir_count++;
     }
 
-    size_t get_dir_count()
+    size_t get_dir_count() const
     {
         shared_lock<shared_mutex> lock(_dir_count_mutex);
         return _dir_count;
@@ -141,10 +145,43 @@ class Chicho : private boost::noncopyable
         _files_count++;
     }
 
-    size_t get_files_count()
+    size_t get_files_count() const
     {
         shared_lock<shared_mutex> lock(_files_count_mutex);
         return _files_count;
+    }
+
+    asio::io_service&get_io_service()
+    {
+        return _strand.get_io_service();
+    }
+
+    void on_verbose_timer(const error_code& error)
+    {
+        // timer was cancelled
+        if (error == asio::error::operation_aborted)
+        { 
+            cout << "asio::error::operation_aborted" << endl;
+            return;
+        }
+        status();
+        if (!_verbose_timer.get_io_service().stopped())
+        {
+            _verbose_timer.expires_from_now(_verbose_period);
+            _verbose_timer.async_wait([this](const error_code& error)
+                {this->on_verbose_timer(error); });
+        }
+    }
+
+    void status() const
+    {
+        auto elapsed = (steady_clock::now() - _start);
+        minutes mm = duration_cast<minutes>(elapsed);
+        seconds ss = duration_cast<seconds>(elapsed % minutes(1));
+        milliseconds ms = duration_cast<milliseconds>(elapsed % seconds(1));
+        std::cout << get_files_count() << " files in " << get_dir_count() << " directories in " <<
+            setfill('0') << setw(2) << mm.count() << " mns " << setw(2) << ss.count() << "." << setw(3) << ms.count() << " secs" <<
+            endl;
     }
 
 public:
@@ -153,9 +190,16 @@ public:
         ,_files_count(0)
         ,_cfg(cfg)
         ,_start(steady_clock::now())
-        ,_io_service(io_service)
         , _strand(io_service)
+        ,_verbose_period(1)
+        ,_verbose_timer(io_service, chrono::steady_clock::now() + _verbose_period)
     {
+        if (_cfg.chunk_reused)
+            _buffer = gen_random(_cfg.chunk);
+
+        _verbose_timer.async_wait([this](const error_code& error) 
+            {this->on_verbose_timer(error); });
+
         _target_dir = cfg.target_dir;
         std::error_code ec;
         if (!exists(_target_dir, ec))
@@ -167,18 +211,12 @@ public:
 
     ~Chicho()
     {
-        auto elapsed = (steady_clock::now() - _start);
-        minutes mm = duration_cast<minutes>(elapsed);
-        seconds ss = duration_cast<seconds>(elapsed % minutes(1));
-        milliseconds ms = duration_cast<milliseconds>(elapsed % seconds(1));
-        std::cout << get_files_count() << " files in " << get_dir_count() << " directories in " <<
-            setfill('0') << setw(2) << mm.count() << " mns " << setw(2) << ss.count() << "." << setw(3) << ms.count() << " secs" <<
-            endl;
+        status();
     }
 
     void run()
     {
-        _strand.dispatch([this]() {
+        get_io_service().post([this]() {
             vector<fs::path> end_paths = generate(_cfg.target_dir);
             browse(end_paths);
         });
@@ -187,13 +225,13 @@ public:
     void browse(vector<fs::path> end_paths)
     {
         Chicho& chicho = *this;
-        for (size_t v = 1; v < _cfg.depth && !_io_service.stopped(); v++)
+        for (size_t v = 1; v < _cfg.depth && !get_io_service().stopped(); v++)
         {
             vector<fs::path> new_end_paths;
             for_each(end_paths.begin(), end_paths.end(),
                 [this, &new_end_paths](const fs::path& ipath)
             {
-                if (_io_service.stopped())
+                if (get_io_service().stopped())
                     return;
                 vector<fs::path> generated = generate(ipath);
                 new_end_paths.insert(new_end_paths.end(), generated.begin(), generated.end());
@@ -211,10 +249,10 @@ public:
 
     vector<char> get_chunck(size_t len=0)
     {
+        BOOST_ASSERT((_cfg.chunk_reused && !_buffer.empty()) || !_cfg.chunk_reused);
+
         if(!_cfg.chunk_reused)
             return gen_random(len ? len : _cfg.chunk);
-        if( _buffer.empty())
-            _buffer = gen_random(_cfg.chunk);
         if(!len || len == _cfg.chunk)
             return _buffer;
         return gen_random(len);
@@ -240,7 +278,7 @@ public:
         fs::create_directory(new_dir);
         inc_dir_count();
 
-        _io_service.post([this, new_dir]() {
+        _strand.get_io_service().post([this, new_dir]() {
                 this->file_generation(new_dir); });
 
         return new_dir;
@@ -248,16 +286,16 @@ public:
 
     void file_generation(fs::path new_dir)
     {
-        for (size_t f = 0; f < _cfg.file_count && !_io_service.stopped(); f++)
+        for (size_t f = 0; f < _cfg.file_count && !get_io_service().stopped(); f++)
         {
             fs::path new_file = new_file_name(new_dir);
             error_code ec;
             size_t count = 0;
-            while (exists(new_file, ec) && !_io_service.stopped())
+            while (exists(new_file, ec) && !get_io_service().stopped())
             {
                 if (++count > 10)
                 {
-                    _io_service.stop();
+                    get_io_service().stop();
                     stringstream ss;
                     ss << "Unable to generate a new file name (" << new_file << ")";
                     throw runtime_error(ss.str());
@@ -270,12 +308,12 @@ public:
             size_t i = 0;
             auto& file_length = _cfg.file_length;
             auto& chunk = _cfg.chunk;
-            for (; i < (file_length % chunk) && !_io_service.stopped(); i++)
+            for (; i < (file_length % chunk) && !get_io_service().stopped(); i++)
             {
                 vector<char> v = get_chunck();
                 file.write(&v[0], v.size());
             }
-            if (_io_service.stopped())
+            if (get_io_service().stopped())
                 return;
             const size_t fillup = file_length - i * chunk;
             if (fillup)
@@ -289,10 +327,10 @@ public:
     vector<fs::path> generate(const fs::path& parent)
     {
         vector<fs::path> end_paths;
-        for (size_t h = 0; h < _cfg.dir_count && !_io_service.stopped(); h++)
+        for (size_t h = 0; h < _cfg.dir_count && !get_io_service().stopped(); h++)
         {
             fs::path generated = create_directory_and_files(parent);
-            if (_io_service.stopped())
+            if (get_io_service().stopped())
                 break;
             end_paths.push_back(generated);
         }
