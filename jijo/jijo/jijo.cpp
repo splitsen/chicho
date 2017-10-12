@@ -10,11 +10,8 @@
 #include <asio.hpp>
 #include <asio/steady_timer.hpp>
 
-#include <chrono>
-
 #include <boost/program_options.hpp>
-namespace po = boost::program_options;
-
+#include <chrono>
 #include <iostream>
 #include <fstream>
 #include <iomanip>
@@ -23,6 +20,7 @@ namespace po = boost::program_options;
 #include <shared_mutex>
 #include <filesystem>
 
+namespace po = boost::program_options;
 namespace fs = std::experimental::filesystem;
 using namespace std;
 using namespace std::chrono;
@@ -119,11 +117,12 @@ class Chicho : private boost::noncopyable
     mutable shared_mutex _files_count_mutex;
     size_t _files_count = 0;
 
+    size_t _files_total = 0;
+
     const Config& _cfg;
     fs::path _target_dir;
     const chrono::time_point<steady_clock> _start;
     vector<char> _buffer;
-    asio::strand _strand;
     chrono::seconds _verbose_period;
     asio::steady_timer _verbose_timer;
 
@@ -143,6 +142,12 @@ class Chicho : private boost::noncopyable
     {
         unique_lock<shared_mutex> lock(_files_count_mutex);
         _files_count++;
+        if (_files_total == _files_count)
+        {
+            asio::error_code ec;
+            _verbose_timer.cancel(ec);
+            get_io_service().stop();
+        }
     }
 
     size_t get_files_count() const
@@ -151,21 +156,19 @@ class Chicho : private boost::noncopyable
         return _files_count;
     }
 
-    asio::io_service&get_io_service()
+    asio::io_service& get_io_service()
     {
-        return _strand.get_io_service();
+        return _verbose_timer.get_io_service();
     }
 
     void on_verbose_timer(const error_code& error)
     {
         // timer was cancelled
         if (error == asio::error::operation_aborted)
-        { 
-            cout << "asio::error::operation_aborted" << endl;
             return;
-        }
+
         status();
-        if (!_verbose_timer.get_io_service().stopped())
+        if (!_verbose_timer.get_io_service().stopped() )
         {
             _verbose_timer.expires_from_now(_verbose_period);
             _verbose_timer.async_wait([this](const error_code& error)
@@ -188,12 +191,17 @@ public:
     Chicho(const Config& cfg, asio::io_service& io_service)
         :_dir_count(0)
         ,_files_count(0)
+        ,_files_total(0)
         ,_cfg(cfg)
         ,_start(steady_clock::now())
-        , _strand(io_service)
         ,_verbose_period(1)
         ,_verbose_timer(io_service, chrono::steady_clock::now() + _verbose_period)
     {
+        size_t dir_total = 0;
+        for (size_t i = 1; i <= cfg.depth; i++)
+            dir_total += static_cast<size_t>(pow(cfg.dir_count, i));
+        _files_total = dir_total * cfg.file_count;
+
         if (_cfg.chunk_reused)
             _buffer = gen_random(_cfg.chunk);
 
@@ -278,7 +286,7 @@ public:
         fs::create_directory(new_dir);
         inc_dir_count();
 
-        _strand.get_io_service().post([this, new_dir]() {
+        get_io_service().post([this, new_dir]() {
                 this->file_generation(new_dir); });
 
         return new_dir;
@@ -302,7 +310,8 @@ public:
                 }
                 fs::path new_file = new_file_name(new_dir);
             }
-            ofstream file(new_file);
+            shared_ptr<pair<ofstream,asio::strand>> file_strand = 
+                make_shared<pair<ofstream, asio::strand>>(new_file, get_io_service());
             inc_files_count();
 
             size_t i = 0;
@@ -310,16 +319,20 @@ public:
             auto& chunk = _cfg.chunk;
             for (; i < (file_length % chunk) && !get_io_service().stopped(); i++)
             {
-                vector<char> v = get_chunck();
-                file.write(&v[0], v.size());
+                file_strand->second.post([this, file_strand]() {
+                    vector<char> v = this->get_chunck();
+                    file_strand->first.write(&v[0], v.size());});
+
             }
             if (get_io_service().stopped())
                 return;
             const size_t fillup = file_length - i * chunk;
             if (fillup)
             {
-                vector<char> v = get_chunck(file_length - i * chunk);
-                file.write(&v[0], v.size());
+                size_t size = file_length - i * chunk;
+                file_strand->second.post([this, file_strand, size]() {
+                    vector<char> v = this->get_chunck(size);
+                    file_strand->first.write(&v[0], v.size()); });
             }
         }
     }
