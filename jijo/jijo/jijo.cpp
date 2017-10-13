@@ -123,8 +123,10 @@ class Chicho : private boost::noncopyable
     fs::path _target_dir;
     const chrono::time_point<steady_clock> _start;
     vector<char> _buffer;
-    chrono::seconds _verbose_period;
+    chrono::milliseconds _verbose_period;
     asio::steady_timer _verbose_timer;
+    asio::io_service& _worker_io_service;
+    asio::signal_set _signals;
 
     void inc_dir_count()
     {
@@ -143,11 +145,7 @@ class Chicho : private boost::noncopyable
         unique_lock<shared_mutex> lock(_files_count_mutex);
         _files_count++;
         if (_files_total == _files_count)
-        {
-            asio::error_code ec;
-            _verbose_timer.cancel(ec);
-            get_io_service().stop();
-        }
+            stop();
     }
 
     size_t get_files_count() const
@@ -158,7 +156,12 @@ class Chicho : private boost::noncopyable
 
     asio::io_service& get_io_service()
     {
-        return _verbose_timer.get_io_service();
+        return _worker_io_service;
+    }
+
+    bool is_stopped()
+    {
+        return get_io_service().stopped();
     }
 
     void on_verbose_timer(const error_code& error)
@@ -168,35 +171,64 @@ class Chicho : private boost::noncopyable
             return;
 
         status();
-        if (!_verbose_timer.get_io_service().stopped() )
+        if (!is_stopped() )
         {
             _verbose_timer.expires_from_now(_verbose_period);
             _verbose_timer.async_wait([this](const error_code& error)
-                {this->on_verbose_timer(error); });
+                {on_verbose_timer(error); });
         }
     }
 
-    void status() const
+    void status(size_t files_count, size_t dir_count) const
     {
         auto elapsed = (steady_clock::now() - _start);
         minutes mm = duration_cast<minutes>(elapsed);
         seconds ss = duration_cast<seconds>(elapsed % minutes(1));
         milliseconds ms = duration_cast<milliseconds>(elapsed % seconds(1));
-        std::cout << get_files_count() << " files in " << get_dir_count() << " directories in " <<
+        std::cout << files_count << " files in " << dir_count << " directories in " <<
             setfill('0') << setw(2) << mm.count() << " mns " << setw(2) << ss.count() << "." << setw(3) << ms.count() << " secs" <<
             endl;
     }
 
+    void status() const
+    {
+        status(get_files_count(), get_dir_count());
+    }
+
+    void handle_stop(const asio::error_code& error, int signal_number)
+    {
+        stop();
+    }
+
+    void stop()
+    {
+        _worker_io_service.stop();
+        _verbose_timer.get_io_service().stop();
+    }
+
 public:
-    Chicho(const Config& cfg, asio::io_service& io_service)
+    Chicho(const Config& cfg, asio::io_service& c_io_service, asio::io_service& w_io_service)
         :_dir_count(0)
         ,_files_count(0)
         ,_files_total(0)
         ,_cfg(cfg)
         ,_start(steady_clock::now())
-        ,_verbose_period(1)
-        ,_verbose_timer(io_service, chrono::steady_clock::now() + _verbose_period)
+        ,_verbose_period(333) // milliseconds
+        ,_verbose_timer(c_io_service, chrono::steady_clock::now() + _verbose_period)
+        ,_worker_io_service(w_io_service)
+        ,_signals(w_io_service)
     {
+        // Register to handle the signals that indicate when the server should exit.
+        // It is safe to register for the same signal multiple times in a program,
+        // provided all registration for the specified signal is made through Asio.
+        _signals.add(SIGINT);
+        _signals.add(SIGTERM);
+#if defined(SIGQUIT)
+        _signals_.add(SIGQUIT);
+#endif // defined(SIGQUIT)
+        _signals.async_wait([this](const asio::error_code& error, int signal_number){ 
+            handle_stop(error, signal_number); });
+
         size_t dir_total = 0;
         for (size_t i = 1; i <= cfg.depth; i++)
             dir_total += static_cast<size_t>(pow(cfg.dir_count, i));
@@ -206,7 +238,7 @@ public:
             _buffer = gen_random(_cfg.chunk);
 
         _verbose_timer.async_wait([this](const error_code& error) 
-            {this->on_verbose_timer(error); });
+            {on_verbose_timer(error); });
 
         _target_dir = cfg.target_dir;
         std::error_code ec;
@@ -233,15 +265,17 @@ public:
     void browse(vector<fs::path> end_paths)
     {
         Chicho& chicho = *this;
-        for (size_t v = 1; v < _cfg.depth && !get_io_service().stopped(); v++)
+        for (size_t v = 1; v < _cfg.depth && !is_stopped(); v++)
         {
             vector<fs::path> new_end_paths;
             for_each(end_paths.begin(), end_paths.end(),
                 [this, &new_end_paths](const fs::path& ipath)
             {
-                if (get_io_service().stopped())
+                if (is_stopped())
                     return;
                 vector<fs::path> generated = generate(ipath);
+                if (is_stopped())
+                    return;
                 new_end_paths.insert(new_end_paths.end(), generated.begin(), generated.end());
             });
             end_paths = new_end_paths;
@@ -287,19 +321,19 @@ public:
         inc_dir_count();
 
         get_io_service().post([this, new_dir]() {
-                this->file_generation(new_dir); });
+            file_generation(new_dir); });
 
         return new_dir;
     }
 
     void file_generation(fs::path new_dir)
     {
-        for (size_t f = 0; f < _cfg.file_count && !get_io_service().stopped(); f++)
+        for (size_t f = 0; f < _cfg.file_count && !is_stopped(); f++)
         {
             fs::path new_file = new_file_name(new_dir);
             error_code ec;
             size_t count = 0;
-            while (exists(new_file, ec) && !get_io_service().stopped())
+            while (exists(new_file, ec) && !is_stopped())
             {
                 if (++count > 10)
                 {
@@ -317,21 +351,21 @@ public:
             size_t i = 0;
             auto& file_length = _cfg.file_length;
             auto& chunk = _cfg.chunk;
-            for (; i < (file_length % chunk) && !get_io_service().stopped(); i++)
+            for (; i < (file_length % chunk) && !is_stopped(); i++)
             {
                 file_strand->second.post([this, file_strand]() {
-                    vector<char> v = this->get_chunck();
+                    vector<char> v = get_chunck();
                     file_strand->first.write(&v[0], v.size());});
 
             }
-            if (get_io_service().stopped())
+            if (is_stopped())
                 return;
             const size_t fillup = file_length - i * chunk;
             if (fillup)
             {
                 size_t size = file_length - i * chunk;
                 file_strand->second.post([this, file_strand, size]() {
-                    vector<char> v = this->get_chunck(size);
+                    vector<char> v = get_chunck(size);
                     file_strand->first.write(&v[0], v.size()); });
             }
         }
@@ -340,24 +374,16 @@ public:
     vector<fs::path> generate(const fs::path& parent)
     {
         vector<fs::path> end_paths;
-        for (size_t h = 0; h < _cfg.dir_count && !get_io_service().stopped(); h++)
+        for (size_t h = 0; h < _cfg.dir_count && !is_stopped(); h++)
         {
             fs::path generated = create_directory_and_files(parent);
-            if (get_io_service().stopped())
-                break;
+            if (is_stopped())
+                return vector<fs::path>();
             end_paths.push_back(generated);
         }
         return end_paths;
     }
 };
-
-asio::io_service* g_io_service = nullptr;
-void sig_handler(int param)
-{
-    if (!g_io_service)
-        return;
-    g_io_service->stop();
-}
 
 int main(int ac, char* av[])
 {
@@ -366,26 +392,19 @@ int main(int ac, char* av[])
         if (cfg.Help())
             return 0;
 
-        asio::io_service io_service;
-        g_io_service = &io_service;
+        asio::io_service io_service[2];
 
-        // Register to handle the signals that indicate when the server should exit.
-        g_io_service = &io_service;
-        signal(SIGINT, sig_handler);
-        signal(SIGTERM, sig_handler);
-#if defined(SIGQUIT)
-        signal(SIGQUIT, sig_handler);
-#endif // defined(SIGQUIT)
-
-        Chicho chicho(cfg, io_service);
+        Chicho chicho(cfg, io_service[0], io_service[1]);
         chicho.run();
 
         // Create a pool of threads to run all of the io_services.
         /// The io_service used to perform asynchronous operations.
         std::vector<shared_ptr<thread> > threads;
+        threads.push_back(make_shared<thread>(
+            [&io_service]() {io_service[0].run(); }));
         for (std::size_t i = 0; i < cfg.thread_pool; ++i)
             threads.push_back( make_shared<thread>(
-                [&io_service]() {io_service.run(); }));
+                [&io_service]() {io_service[1].run(); }));
 
         // Wait for all threads in the pool to exit.
         for (std::size_t i = 0; i < threads.size(); ++i)
