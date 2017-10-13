@@ -8,7 +8,6 @@
 #define BOOST_DATE_TIME_NO_LIB
 #define BOOST_REGEX_NO_LIB
 #include <asio.hpp>
-#include <asio/steady_timer.hpp>
 
 #include <boost/program_options.hpp>
 #include <chrono>
@@ -55,7 +54,16 @@ struct Config
     size_t chunk, depth, dir_count, file_count, name_length, file_length,
         thread_pool;
     string target_dir, file_ext;
-    bool chunk_reused;
+
+    pair<size_t, size_t> eval() const
+    {
+        size_t dir_total = 0, files_total = 0;
+        for (size_t i = 1; i <= depth; i++)
+            dir_total += static_cast<size_t>(pow(dir_count, i));
+        files_total = dir_total * file_count;
+
+        return make_pair(dir_total, files_total);
+    }
 
     bool Help() const
     {
@@ -65,7 +73,7 @@ struct Config
 
 Config Get_config(int ac, char* av[])
 {
-    size_t HW_cores = thread::hardware_concurrency();
+    size_t HW_cores = max<size_t>(1, thread::hardware_concurrency());
     Config cfg;
     po::options_description desc("Allowed options");
     desc.add_options()
@@ -79,8 +87,6 @@ Config Get_config(int ac, char* av[])
             "Files are filled with a buffer of random character, the size of this buffer if the chunk size.\n"
             "Chunk allows to set RAM memory impact versus number of calls to the OS write file API"
             )
-        ("chunk_reused", po::value<bool>(&cfg.chunk_reused)->default_value(false),
-            "Use the same chunk for all files.")
         ("depth", po::value<size_t>(&cfg.depth)->default_value(3),
             "Directories depth.")
         ("dir_count", po::value<size_t>(&cfg.dir_count)->default_value(3),
@@ -95,6 +101,7 @@ Config Get_config(int ac, char* av[])
             "File extension.")
         ("thread_pool", po::value<size_t>(&cfg.thread_pool)->default_value(HW_cores),
             "thread pool size, default to count of HW concurrent threads.")
+        ("eval,e", "Display count of files.")
         ;
 
     po::variables_map vm;
@@ -103,6 +110,11 @@ Config Get_config(int ac, char* av[])
 
     if (vm.count("help")) {
         cout << desc << "\n";
+        return Config(true);
+    }
+    if (vm.count("eval")) {
+        auto total = cfg.eval();
+        cout << total.second << " files in " << total.first << " directories." << endl;;
         return Config(true);
     }
 
@@ -121,11 +133,7 @@ class Chicho : private boost::noncopyable
 
     const Config& _cfg;
     fs::path _target_dir;
-    const chrono::time_point<steady_clock> _start;
-    vector<char> _buffer;
-    chrono::milliseconds _verbose_period;
-    asio::steady_timer _verbose_timer;
-    asio::io_service& _worker_io_service;
+    chrono::time_point<steady_clock> _start;
     asio::signal_set _signals;
 
     void inc_dir_count()
@@ -156,7 +164,7 @@ class Chicho : private boost::noncopyable
 
     asio::io_service& get_io_service()
     {
-        return _worker_io_service;
+        return _signals.get_io_service();
     }
 
     bool is_stopped()
@@ -164,22 +172,7 @@ class Chicho : private boost::noncopyable
         return get_io_service().stopped();
     }
 
-    void on_verbose_timer(const error_code& error)
-    {
-        // timer was cancelled
-        if (error == asio::error::operation_aborted)
-            return;
-
-        status();
-        if (!is_stopped() )
-        {
-            _verbose_timer.expires_from_now(_verbose_period);
-            _verbose_timer.async_wait([this](const error_code& error)
-                {on_verbose_timer(error); });
-        }
-    }
-
-    void status(size_t files_count, size_t dir_count) const
+    void status(size_t files_count, size_t dir_count)
     {
         auto elapsed = (steady_clock::now() - _start);
         minutes mm = duration_cast<minutes>(elapsed);
@@ -190,11 +183,6 @@ class Chicho : private boost::noncopyable
             endl;
     }
 
-    void status() const
-    {
-        status(get_files_count(), get_dir_count());
-    }
-
     void handle_stop(const asio::error_code& error, int signal_number)
     {
         stop();
@@ -202,25 +190,19 @@ class Chicho : private boost::noncopyable
 
     void stop()
     {
-        _worker_io_service.stop();
-        _verbose_timer.get_io_service().stop();
+        get_io_service().stop();
     }
 
 public:
-    Chicho(const Config& cfg, asio::io_service& c_io_service, asio::io_service& w_io_service)
+    Chicho(const Config& cfg, asio::io_service& io_service)
         :_dir_count(0)
         ,_files_count(0)
-        ,_files_total(0)
+        ,_files_total(cfg.eval().second)
         ,_cfg(cfg)
         ,_start(steady_clock::now())
-        ,_verbose_period(333) // milliseconds
-        ,_verbose_timer(c_io_service, chrono::steady_clock::now() + _verbose_period)
-        ,_worker_io_service(w_io_service)
-        ,_signals(w_io_service)
+        ,_signals(io_service)
     {
         // Register to handle the signals that indicate when the server should exit.
-        // It is safe to register for the same signal multiple times in a program,
-        // provided all registration for the specified signal is made through Asio.
         _signals.add(SIGINT);
         _signals.add(SIGTERM);
 #if defined(SIGQUIT)
@@ -228,17 +210,6 @@ public:
 #endif // defined(SIGQUIT)
         _signals.async_wait([this](const asio::error_code& error, int signal_number){ 
             handle_stop(error, signal_number); });
-
-        size_t dir_total = 0;
-        for (size_t i = 1; i <= cfg.depth; i++)
-            dir_total += static_cast<size_t>(pow(cfg.dir_count, i));
-        _files_total = dir_total * cfg.file_count;
-
-        if (_cfg.chunk_reused)
-            _buffer = gen_random(_cfg.chunk);
-
-        _verbose_timer.async_wait([this](const error_code& error) 
-            {on_verbose_timer(error); });
 
         _target_dir = cfg.target_dir;
         std::error_code ec;
@@ -251,7 +222,7 @@ public:
 
     ~Chicho()
     {
-        status();
+        status(_files_count, _dir_count);
     }
 
     void run()
@@ -291,13 +262,7 @@ public:
 
     vector<char> get_chunck(size_t len=0)
     {
-        BOOST_ASSERT((_cfg.chunk_reused && !_buffer.empty()) || !_cfg.chunk_reused);
-
-        if(!_cfg.chunk_reused)
-            return gen_random(len ? len : _cfg.chunk);
-        if(!len || len == _cfg.chunk)
-            return _buffer;
-        return gen_random(len);
+        return gen_random(len ? len : _cfg.chunk);
     }
 
     fs::path create_directory_and_files(
@@ -392,19 +357,17 @@ int main(int ac, char* av[])
         if (cfg.Help())
             return 0;
 
-        asio::io_service io_service[2];
+        asio::io_service io_service;
 
-        Chicho chicho(cfg, io_service[0], io_service[1]);
+        Chicho chicho(cfg, io_service);
         chicho.run();
 
         // Create a pool of threads to run all of the io_services.
         /// The io_service used to perform asynchronous operations.
         std::vector<shared_ptr<thread> > threads;
-        threads.push_back(make_shared<thread>(
-            [&io_service]() {io_service[0].run(); }));
         for (std::size_t i = 0; i < cfg.thread_pool; ++i)
             threads.push_back( make_shared<thread>(
-                [&io_service]() {io_service[1].run(); }));
+                [&io_service]() {io_service.run(); }));
 
         // Wait for all threads in the pool to exit.
         for (std::size_t i = 0; i < threads.size(); ++i)
