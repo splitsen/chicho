@@ -32,9 +32,8 @@ vector<char> gen_random(size_t len)
         "abcdefghijklmnopqrstuvwxyz";
 
     vector<char> v(len);
-    for (int i = 0; i < len; ++i) {
+    for (int i = 0; i < len; ++i)
         v[i] = alphanum[rand() % (sizeof(alphanum) - 1)];
-    }
 
     return v;
 }
@@ -193,66 +192,6 @@ class Chicho : private boost::noncopyable
         get_io_service().stop();
     }
 
-public:
-    Chicho(const Config& cfg, asio::io_service& io_service)
-        :_dir_count(0)
-        ,_files_count(0)
-        ,_files_total(cfg.eval().second)
-        ,_cfg(cfg)
-        ,_start(steady_clock::now())
-        ,_signals(io_service)
-    {
-        // Register to handle the signals that indicate when the server should exit.
-        _signals.add(SIGINT);
-        _signals.add(SIGTERM);
-#if defined(SIGQUIT)
-        _signals_.add(SIGQUIT);
-#endif // defined(SIGQUIT)
-        _signals.async_wait([this](const asio::error_code& error, int signal_number){ 
-            handle_stop(error, signal_number); });
-
-        _target_dir = cfg.target_dir;
-        std::error_code ec;
-        if (!exists(_target_dir, ec))
-        {
-            fs::create_directory(_target_dir);
-            inc_dir_count();
-        }
-    }
-
-    ~Chicho()
-    {
-        status(_files_count, _dir_count);
-    }
-
-    void run()
-    {
-        get_io_service().post([this]() {
-            vector<fs::path> end_paths = generate(_cfg.target_dir);
-            browse(end_paths);
-        });
-    }
-
-    void browse(vector<fs::path> end_paths)
-    {
-        Chicho& chicho = *this;
-        for (size_t v = 1; v < _cfg.depth && !is_stopped(); v++)
-        {
-            vector<fs::path> new_end_paths;
-            for_each(end_paths.begin(), end_paths.end(),
-                [this, &new_end_paths](const fs::path& ipath)
-            {
-                if (is_stopped())
-                    return;
-                vector<fs::path> generated = generate(ipath);
-                if (is_stopped())
-                    return;
-                new_end_paths.insert(new_end_paths.end(), generated.begin(), generated.end());
-            });
-            end_paths = new_end_paths;
-        }
-    }
-
     fs::path new_file_name(const fs::path& parent) const
     {
         fs::path new_file = parent / to_string(gen_random(_cfg.name_length));
@@ -275,20 +214,40 @@ public:
         {
             if (++count > 10)
             {
-                stringstream ss;
-                ss << "Unable to generate a new directory name (" << new_dir << ")";
-                throw runtime_error(ss.str());
+                stop();
+                cerr << "Unable to generate a new directory name (" << new_dir << ")" << endl;
+                return fs::path();
             }
             new_dir = parent / to_string(gen_random(_cfg.name_length));
         }
 
-        fs::create_directory(new_dir);
+        if (!fs::create_directory(new_dir, ec))
+        {
+            stop();
+            cerr << "Unable to create new directory (" << new_dir << ")" << endl;
+            return fs::path();
+        }
         inc_dir_count();
 
         get_io_service().post([this, new_dir]() {
             file_generation(new_dir); });
 
         return new_dir;
+    }
+
+    void file_write(shared_ptr<pair<ofstream, asio::strand>> file_strand, size_t size=0 )
+    {
+        auto& file = file_strand->first;
+
+        try {
+            vector<char> v = get_chunck(size);
+            file.write(&v[0], v.size());
+        }
+        catch (const std::ios_base::failure& e)
+        {
+            stop();
+            cerr << e.what() << endl;
+        }
     }
 
     void file_generation(fs::path new_dir)
@@ -298,41 +257,38 @@ public:
             fs::path new_file = new_file_name(new_dir);
             error_code ec;
             size_t count = 0;
-            while (exists(new_file, ec) && !is_stopped())
+            while (exists(new_file, ec))
             {
                 if (++count > 10)
                 {
-                    get_io_service().stop();
-                    stringstream ss;
-                    ss << "Unable to generate a new file name (" << new_file << ")";
-                    throw runtime_error(ss.str());
+                    stop();
+                    cerr << "Unable to generate a new file name (" << new_file << ")" << endl;
+                    return;
                 }
                 fs::path new_file = new_file_name(new_dir);
             }
             shared_ptr<pair<ofstream,asio::strand>> file_strand = 
                 make_shared<pair<ofstream, asio::strand>>(new_file, get_io_service());
+            auto& file = file_strand->first;
+            // set to throw
+            file.exceptions(file.failbit);
             inc_files_count();
 
-            size_t i = 0;
             auto& file_length = _cfg.file_length;
+            if (!file_length)
+                return;
+            size_t i = 0;
             auto& chunk = _cfg.chunk;
             for (; i < (file_length % chunk) && !is_stopped(); i++)
-            {
                 file_strand->second.post([this, file_strand]() {
-                    vector<char> v = get_chunck();
-                    file_strand->first.write(&v[0], v.size());});
-
-            }
+                    file_write(file_strand);});
             if (is_stopped())
                 return;
+
             const size_t fillup = file_length - i * chunk;
             if (fillup)
-            {
-                size_t size = file_length - i * chunk;
-                file_strand->second.post([this, file_strand, size]() {
-                    vector<char> v = get_chunck(size);
-                    file_strand->first.write(&v[0], v.size()); });
-            }
+                file_strand->second.post([this, file_strand, fillup]() {
+                    file_write(file_strand, fillup); });
         }
     }
 
@@ -347,6 +303,64 @@ public:
             end_paths.push_back(generated);
         }
         return end_paths;
+    }
+
+    void iterate()
+    {
+        vector<fs::path> end_paths = generate(_target_dir);
+
+        for (size_t v = 1; v < _cfg.depth && !is_stopped(); v++)
+        {
+            vector<fs::path> new_end_paths;
+            for_each(end_paths.begin(), end_paths.end(),
+                [this, &new_end_paths](const fs::path& ipath)
+            {
+                if (is_stopped())
+                    return;
+                vector<fs::path> generated = generate(ipath);
+                if (is_stopped())
+                    return;
+                new_end_paths.insert(new_end_paths.end(), generated.begin(), generated.end());
+            });
+            end_paths = new_end_paths;
+        }
+    }
+
+public:
+    Chicho(const Config& cfg, asio::io_service& io_service)
+        :_dir_count(0)
+        , _files_count(0)
+        , _files_total(cfg.eval().second)
+        , _cfg(cfg)
+        , _start(steady_clock::now())
+        , _signals(io_service)
+    {
+        // Register to handle the signals that indicate when the server should exit.
+        _signals.add(SIGINT);
+        _signals.add(SIGTERM);
+#if defined(SIGQUIT)
+        _signals_.add(SIGQUIT);
+#endif // defined(SIGQUIT)
+        _signals.async_wait([this](const asio::error_code& error, int signal_number) {
+            handle_stop(error, signal_number); });
+
+        _target_dir = cfg.target_dir;
+        if (!exists(_target_dir))
+        {
+            fs::create_directory(_target_dir);
+            inc_dir_count();
+        }
+    }
+
+    ~Chicho()
+    {
+        status(_files_count, _dir_count);
+    }
+
+    void run()
+    {
+        get_io_service().post([this]() {
+            iterate();});
     }
 };
 
