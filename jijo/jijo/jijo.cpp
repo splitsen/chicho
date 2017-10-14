@@ -267,16 +267,30 @@ class Chicho : private boost::noncopyable
                 }
                 fs::path new_file = new_file_name(new_dir);
             }
-            shared_ptr<pair<ofstream,asio::strand>> file_strand = 
-                make_shared<pair<ofstream, asio::strand>>(new_file, get_io_service());
+
+            auto& file_length = _cfg.file_length;
+            shared_ptr<pair<ofstream, asio::strand>> file_strand;
+            try {
+                inc_files_count();
+                if (!file_length)
+                {
+                    ofstream file(new_file);
+                    file.close();
+                    continue;
+                }
+                file_strand = make_shared<pair<ofstream, asio::strand>>(new_file, get_io_service());
+            }
+            catch (const std::ios_base::failure& e)
+            {
+                stop();
+                cerr << e.what() << endl;
+                return;
+            }
+
             auto& file = file_strand->first;
             // set to throw
             file.exceptions(file.failbit);
-            inc_files_count();
 
-            auto& file_length = _cfg.file_length;
-            if (!file_length)
-                return;
             size_t i = 0;
             auto& chunk = _cfg.chunk;
             for (; i < (file_length % chunk) && !is_stopped(); i++)
@@ -377,7 +391,6 @@ int main(int ac, char* av[])
         chicho.run();
 
         // Create a pool of threads to run all of the io_services.
-        /// The io_service used to perform asynchronous operations.
         std::vector<shared_ptr<thread> > threads;
         for (std::size_t i = 0; i < cfg.thread_pool; ++i)
             threads.push_back( make_shared<thread>(
