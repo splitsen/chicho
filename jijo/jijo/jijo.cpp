@@ -77,30 +77,28 @@ Config Get_config(int ac, char* av[])
     po::options_description desc("Allowed options");
     desc.add_options()
         ("help,h", "Produce this help message.")
-        ("target", po::value<string>(&cfg.target_dir)->default_value("."),
+        ("target,t", po::value<string>(&cfg.target_dir)->default_value("."),
             "Generate in that directory, default is current, if not exist create.\n"
             "chicho does not add or modify an existing directory."
             )
-        ("chunk", po::value<size_t>(&cfg.chunk)->default_value(1048),
-            "Chunk size.\n"
-            "Files are filled with a buffer of random character, the size of this buffer if the chunk size.\n"
-            "Chunk allows to set RAM memory impact versus number of calls to the OS write file API"
-            )
-        ("depth", po::value<size_t>(&cfg.depth)->default_value(3),
+        ("depth,d", po::value<size_t>(&cfg.depth)->default_value(3),
             "Directories depth.")
-        ("dir_count", po::value<size_t>(&cfg.dir_count)->default_value(3),
+        ("dir_count,r", po::value<size_t>(&cfg.dir_count)->default_value(3),
             "Directories count per depth level.")
-        ("file_count", po::value<size_t>(&cfg.file_count)->default_value(5),
+        ("file_count,f", po::value<size_t>(&cfg.file_count)->default_value(5),
             "Files count count per directory.")
-        ("name_length", po::value<size_t>(&cfg.name_length)->default_value(5),
-            "Directory/file name length.")
-        ("file_length", po::value<size_t>(&cfg.file_length)->default_value(1049),
+        ("file_length,l", po::value<size_t>(&cfg.file_length)->default_value(1049),
             "File length.")
+        ("eval,e", "Display count of files, total bytes with current args.")
         ("file_ext", po::value<string>(&cfg.file_ext)->default_value("rdm"),
             "File extension.")
+        ("name_length", po::value<size_t>(&cfg.name_length)->default_value(5),
+            "Directory/file name length.")
+        ("chunk", po::value<size_t>(&cfg.chunk)->default_value(1048),
+            "Chunk size.\n"
+            "Files are filled with a buffer of random character, the size of this buffer if the chunk size.")
         ("thread_pool", po::value<size_t>(&cfg.thread_pool)->default_value(HW_cores),
             "thread pool size, default to count of HW concurrent threads.")
-        ("eval,e", "Display count of files.")
         ;
 
     po::variables_map vm;
@@ -112,8 +110,18 @@ Config Get_config(int ac, char* av[])
         return Config(true);
     }
     if (vm.count("eval")) {
-        auto total = cfg.eval();
-        cout << total.second << " files in " << total.first << " directories." << endl;;
+        fs::space_info devi = fs::space(cfg.target_dir);
+        cout << "Target dir: " << fs::absolute(fs::path(cfg.target_dir)) << endl;
+        cout << "         Capacity       Free      Available\n"
+            << "       " << devi.capacity << "   "
+            << devi.free << "   " << devi.available << endl;
+        const auto total = cfg.eval();
+        const auto total_bytes = total.second * cfg.file_length;
+        cout << "Chicho could create:" << endl << "\t" <<
+            total.second << " files in " << total.first << " directories." << endl << "\t" <<
+            "for a total of " << total_bytes << " bytes" <<
+            " (" << static_cast<int>((100. * total_bytes) / double(devi.available)) << "% of available)" <<
+            endl;
         return Config(true);
     }
 
@@ -250,6 +258,19 @@ class Chicho : private boost::noncopyable
         }
     }
 
+    void file_create(fs::path new_file)
+    {
+        try {
+            ofstream file(new_file);
+            file.close();
+        }
+        catch (const std::ios_base::failure& e)
+        {
+            stop();
+            cerr << e.what() << endl;
+        }
+    }
+
     void file_generation(fs::path new_dir)
     {
         for (size_t f = 0; f < _cfg.file_count && !is_stopped(); f++)
@@ -274,8 +295,8 @@ class Chicho : private boost::noncopyable
                 inc_files_count();
                 if (!file_length)
                 {
-                    ofstream file(new_file);
-                    file.close();
+                    get_io_service().post([this, new_file]() {
+                        file_create(new_file);});
                     continue;
                 }
                 file_strand = make_shared<pair<ofstream, asio::strand>>(new_file, get_io_service());
