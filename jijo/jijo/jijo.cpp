@@ -15,8 +15,7 @@
 #include <fstream>
 #include <iomanip>
 #include <thread>
-#include <mutex>
-#include <shared_mutex>
+#include <atomic>
 #include <filesystem>
 
 namespace po = boost::program_options;
@@ -130,12 +129,8 @@ Config Get_config(int ac, char* av[])
 
 class Chicho : private boost::noncopyable
 {
-    mutable shared_mutex _dir_count_mutex;
-    size_t _dir_count = 0;
-
-    mutable shared_mutex _files_count_mutex;
-    size_t _files_count = 0;
-
+    atomic<size_t> _dir_count = 0;
+    atomic<size_t> _files_count = 0;
     size_t _files_total = 0;
 
     const Config& _cfg;
@@ -145,19 +140,16 @@ class Chicho : private boost::noncopyable
 
     void inc_dir_count()
     {
-        unique_lock<shared_mutex> lock(_dir_count_mutex);
         _dir_count++;
     }
 
     size_t get_dir_count() const
     {
-        shared_lock<shared_mutex> lock(_dir_count_mutex);
         return _dir_count;
     }
 
     void inc_files_count()
     {
-        unique_lock<shared_mutex> lock(_files_count_mutex);
         _files_count++;
         if (_files_total == _files_count)
             stop();
@@ -165,7 +157,6 @@ class Chicho : private boost::noncopyable
 
     size_t get_files_count() const
     {
-        shared_lock<shared_mutex> lock(_files_count_mutex);
         return _files_count;
     }
 
