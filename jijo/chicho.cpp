@@ -19,7 +19,7 @@
 #include <experimental/filesystem>
 
 namespace po = boost::program_options;
-namespace fs = std::filesystem;
+namespace fs = std::experimental::filesystem;
 using namespace std;
 using namespace std::chrono;
 
@@ -364,7 +364,7 @@ public:
         _signals.add(SIGINT);
         _signals.add(SIGTERM);
 #if defined(SIGQUIT)
-        _signals_.add(SIGQUIT);
+        _signals.add(SIGQUIT);
 #endif // defined(SIGQUIT)
         _signals.async_wait([this](const asio::error_code& error, int signal_number) {
             handle_stop(error, signal_number); });

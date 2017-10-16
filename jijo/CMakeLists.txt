@@ -1,3 +1,4 @@
+# cmake -G "Unix Makefiles" ../ -DBOOST_ROOT=/mnt/c/dev/boost_1_65_1 -DASIO_INCLUDE_DIR=/mnt/c/dev/asio-1.10.8/include
 cmake_minimum_required(VERSION 3.4)
 
 project(chicho
@@ -29,3 +30,9 @@ include_directories(AFTER
 
 target_link_libraries(chicho
     program_options)
+
+if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU") # gcc
+    target_link_libraries(chicho
+        stdc++fs
+        pthread)
+endif()
