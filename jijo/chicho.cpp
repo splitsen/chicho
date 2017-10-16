@@ -16,14 +16,14 @@
 #include <iomanip>
 #include <thread>
 #include <atomic>
-#include <filesystem>
+#include <experimental/filesystem>
 
 namespace po = boost::program_options;
-namespace fs = std::experimental::filesystem;
+namespace fs = std::filesystem;
 using namespace std;
 using namespace std::chrono;
 
-vector<char> gen_random(size_t len) 
+vector<char> gen_random(size_t len)
 {
     static const char alphanum[] =
         "0123456789"
@@ -129,9 +129,8 @@ Config Get_config(int ac, char* av[])
 
 class Chicho : private boost::noncopyable
 {
-    atomic<size_t> _dir_count = 0;
-    atomic<size_t> _files_count = 0;
-    size_t _files_total = 0;
+    atomic<size_t> _dir_count, _files_count;
+    size_t _files_total;
 
     const Config& _cfg;
     fs::path _target_dir;
