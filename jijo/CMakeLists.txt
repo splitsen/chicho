@@ -1,4 +1,8 @@
-# cmake -G "Unix Makefiles" ../ -DBOOST_ROOT=/mnt/c/dev/boost_1_65_1 -DASIO_INCLUDE_DIR=/mnt/c/dev/asio-1.10.8/include
+# cmake -G "Unix Makefiles" .. -DBOOST_ROOT=/mnt/c/dev/boost_1_65_1 -DASIO_INCLUDE_DIR=/mnt/c/dev/asio-1.10.8/include
+# cmake -G "Visual Studio 15 2017" .. -DBOOST_ROOT=C:/dev/boost_1_65_1 -DASIO_INCLUDE_DIR=C:/dev/asio-1.10.8/include
+#
+# Should add static link multihread
+# https://github.com/google/googletest/issues/266
 cmake_minimum_required(VERSION 3.4)
 
 project(chicho
@@ -7,6 +11,7 @@ project(chicho
 find_package(Boost          REQUIRED)
 
 add_compile_options("-std=c++11")
+add_definitions(-DBOOST_ALL_NO_LIB)
 
 add_library(program_options
     ${BOOST_ROOT}/libs/program_options/src/cmdline.cpp

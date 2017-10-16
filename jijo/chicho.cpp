@@ -31,7 +31,7 @@ vector<char> gen_random(size_t len)
         "abcdefghijklmnopqrstuvwxyz";
 
     vector<char> v(len);
-    for (int i = 0; i < len; ++i)
+    for (size_t i = 0; i < len; ++i)
         v[i] = alphanum[rand() % (sizeof(alphanum) - 1)];
 
     return v;
