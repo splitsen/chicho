@@ -1,8 +1,6 @@
 # cmake -G "Unix Makefiles" .. -DBOOST_ROOT=/mnt/c/dev/boost_1_65_1 -DASIO_INCLUDE_DIR=/mnt/c/dev/asio-1.10.8/include
-# cmake -G "Visual Studio 15 2017" .. -DBOOST_ROOT=C:/dev/boost_1_65_1 -DASIO_INCLUDE_DIR=C:/dev/asio-1.10.8/include
-#
-# Should add static link multihread
-# https://github.com/google/googletest/issues/266
+# cmake -G "Visual Studio 15 2017 Win64" .. -DBOOST_ROOT=C:/dev/boost_1_65_1 -DASIO_INCLUDE_DIR=C:/dev/asio-1.10.8/include
+
 cmake_minimum_required(VERSION 3.4)
 
 project(chicho
@@ -10,8 +8,9 @@ project(chicho
 
 find_package(Boost          REQUIRED)
 
-add_compile_options("-std=c++11")
-add_definitions(-DBOOST_ALL_NO_LIB)
+add_definitions(
+    -DBOOST_ALL_NO_LIB
+    -DBUILD_SHARED_LIBS=OFF)
 
 add_library(program_options
     ${BOOST_ROOT}/libs/program_options/src/cmdline.cpp
@@ -29,14 +28,28 @@ add_library(program_options
 add_executable(chicho
     chicho.cpp)
 
+set_target_properties(chicho PROPERTIES
+    CXX_STANDARD_REQUIRED 17)
+
 include_directories(AFTER
-        ${ASIO_INCLUDE_DIR}
-        ${Boost_INCLUDE_DIR})
+    ${ASIO_INCLUDE_DIR}
+    ${Boost_INCLUDE_DIR})
 
 target_link_libraries(chicho
     program_options)
 
-if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU") # gcc
+# using static runtime library in order to avoid install runtime shared lib
+if (CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+    # https://cmake.org/Wiki/CMake_FAQ#How_can_I_build_my_MSVC_application_with_a_static_runtime.3F
+    foreach(flag_var
+            CMAKE_CXX_FLAGS CMAKE_CXX_FLAGS_DEBUG CMAKE_CXX_FLAGS_RELEASE
+            CMAKE_CXX_FLAGS_MINSIZEREL CMAKE_CXX_FLAGS_RELWITHDEBINFO)
+       if(${flag_var} MATCHES "/MD")
+          string(REGEX REPLACE "/MD" "/MT" ${flag_var} "${${flag_var}}")
+       endif(${flag_var} MATCHES "/MD")
+    endforeach(flag_var)
+elseif (CMAKE_CXX_COMPILER_ID STREQUAL "GNU") # gcc
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -static-libstdc++")
     target_link_libraries(chicho
         stdc++fs
         pthread)
