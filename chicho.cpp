@@ -16,6 +16,7 @@
 #include <iomanip>
 #include <thread>
 #include <atomic>
+#include <mutex>
 #include <experimental/filesystem>
 
 namespace po = boost::program_options;
@@ -124,6 +125,9 @@ Config Get_config(int ac, char* av[])
         return Config(true);
     }
 
+    if (cfg.chunk > cfg.file_length)
+        cfg.chunk = cfg.file_length;
+
     return cfg;
 }
 
@@ -131,7 +135,8 @@ class Chicho : private boost::noncopyable
 {
     atomic<size_t> _dir_count, _files_count;
     size_t _files_total;
-
+    mutex _err_mutex;
+    vector<string> _err;
     const Config& _cfg;
     fs::path _target_dir;
     chrono::time_point<steady_clock> _start;
@@ -213,7 +218,9 @@ class Chicho : private boost::noncopyable
             if (++count > 10)
             {
                 stop();
-                cerr << "Unable to generate a new directory name (" << new_dir << ")" << endl;
+                stringstream ss;
+                ss << "Unable to generate a new directory name (" << new_dir << ")" << endl;
+                push(ss.str());
                 return fs::path();
             }
             new_dir = parent / to_string(gen_random(_cfg.name_length));
@@ -222,7 +229,9 @@ class Chicho : private boost::noncopyable
         if (!fs::create_directory(new_dir, ec))
         {
             stop();
-            cerr << "Unable to create new directory (" << new_dir << ")" << endl;
+            stringstream ss;
+            ss << "Unable to create new directory (" << new_dir << ")" << endl;
+            push(ss.str());
             return fs::path();
         }
         inc_dir_count();
@@ -244,21 +253,53 @@ class Chicho : private boost::noncopyable
         catch (const std::ios_base::failure& e)
         {
             stop();
-            cerr << e.what() << endl;
+            stringstream ss;
+            ss << "@" << __LINE__ << e.what() << " size=" << size << endl;
+            push(ss.str());
         }
     }
 
     void file_create(fs::path new_file)
     {
-        try {
-            ofstream file(new_file);
-            file.close();
-        }
-        catch (const std::ios_base::failure& e)
+        auto& file_length = _cfg.file_length;
+        if (!file_length)
         {
-            stop();
-            cerr << e.what() << endl;
+            ofstream file(new_file);
+            if (!file)
+            {
+                get_io_service().stop();
+                stringstream ss;
+                ss << "File creating " << new_file << " failed" << endl
+                    << "length=" << new_file.string().length() << endl;
+                push(ss.str());
+            }
+            return;
         }
+        shared_ptr<pair<ofstream, asio::strand>> file_strand =
+            make_shared<pair<ofstream, asio::strand>>(new_file, get_io_service());
+        auto& file = file_strand->first;
+        if(!file)
+        {
+            get_io_service().stop();
+            stringstream ss;
+            ss << "File creating " << new_file << " failed" << endl
+                << "length=" << new_file.string().length() << endl;
+            push(ss.str());
+            return;
+        }
+
+        size_t i = 0;
+        auto& chunk = _cfg.chunk;
+        for (; i < (file_length % chunk) && !is_stopped(); i++)
+            file_strand->second.post([this, file_strand]() {
+                file_write(file_strand); });
+        if (is_stopped())
+            return;
+
+        const size_t fillup = file_length - i * chunk;
+        if (fillup)
+            file_strand->second.post([this, file_strand, fillup]() {
+                file_write(file_strand, fillup); });
     }
 
     void file_generation(fs::path new_dir)
@@ -273,48 +314,24 @@ class Chicho : private boost::noncopyable
                 if (++count > 10)
                 {
                     stop();
-                    cerr << "Unable to generate a new file name (" << new_file << ")" << endl;
+                    stringstream ss;
+                    ss << "Unable to generate a new file name (" << new_file << ")" << endl;
+                    push(ss.str());
                     return;
                 }
                 fs::path new_file = new_file_name(new_dir);
             }
 
-            auto& file_length = _cfg.file_length;
-            shared_ptr<pair<ofstream, asio::strand>> file_strand;
-            try {
-                inc_files_count();
-                if (!file_length)
-                {
-                    get_io_service().post([this, new_file]() {
-                        file_create(new_file);});
-                    continue;
-                }
-                file_strand = make_shared<pair<ofstream, asio::strand>>(new_file, get_io_service());
-            }
-            catch (const std::ios_base::failure& e)
-            {
-                stop();
-                cerr << e.what() << endl;
-                return;
-            }
-
-            auto& file = file_strand->first;
-            // set to throw
-            file.exceptions(file.failbit);
-
-            size_t i = 0;
-            auto& chunk = _cfg.chunk;
-            for (; i < (file_length % chunk) && !is_stopped(); i++)
-                file_strand->second.post([this, file_strand]() {
-                    file_write(file_strand);});
-            if (is_stopped())
-                return;
-
-            const size_t fillup = file_length - i * chunk;
-            if (fillup)
-                file_strand->second.post([this, file_strand, fillup]() {
-                    file_write(file_strand, fillup); });
+            inc_files_count();
+            get_io_service().post([this, new_file]() {
+                file_create(new_file);});
         }
+    }
+
+    void push(const string& msg)
+    {
+        lock_guard<mutex> lock(_err_mutex);
+        _err.push_back(msg);
     }
 
     vector<fs::path> generate(const fs::path& parent)
@@ -379,6 +396,8 @@ public:
 
     ~Chicho()
     {
+        for_each (_err.begin(), _err.end(), [](const string& msg){
+            cerr << msg; });
         status(_files_count, _dir_count);
     }
 
