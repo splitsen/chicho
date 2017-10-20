@@ -1,6 +1,5 @@
-// boost::program_options must be built:
-// C:\dev\boost_1_65_1>bootstrap.bat
-// C:\dev\boost_1_65_1>bjam.exe --build-type=minimal msvc stage --with-program_options address-model=64
+// Copyright (c) 2017 jean Davy (jean.davy.77@gmail.com)
+// Distributed under the Boost Software License, Version 1.0. (http://www.boost.org/LICENSE_1_0.txt)
 
 #ifndef _WIN32_WINNT
 #define _WIN32_WINNT 0x0501

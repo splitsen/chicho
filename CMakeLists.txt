@@ -1,5 +1,14 @@
+# Copyright (c) 2017 jean Davy (jean.davy.77@gmail.com)
+# Distributed under the Boost Software License, Version 1.0. (http://www.boost.org/LICENSE_1_0.txt)
+#
+# chicho program is a file tree generator
+# boost::program_options is required (http://www.boost.org/users/download/)
+# Standalone asio is required (http://think-async.com/Asio)
+# std::filesystem is required (implies a C++17 compiler VS2017, gcc7.2)
+# cmake step by step:
 # cmake -G "Unix Makefiles" .. -DBOOST_ROOT=/mnt/c/dev/boost_1_65_1 -DASIO_INCLUDE_DIR=/mnt/c/dev/asio-1.10.8/include
 # cmake -G "Visual Studio 15 2017 Win64" .. -DBOOST_ROOT=C:/dev/boost_1_65_1 -DASIO_INCLUDE_DIR=C:/dev/asio-1.10.8/include
+# cmake --build . --config Release
 
 cmake_minimum_required(VERSION 3.4)
 
@@ -7,6 +16,10 @@ project(chicho
         LANGUAGES CXX)
 
 find_package(Boost          REQUIRED)
+
+IF(NOT CMAKE_BUILD_TYPE)
+  SET(CMAKE_BUILD_TYPE Release)
+ENDIF(NOT CMAKE_BUILD_TYPE)
 
 add_definitions(
     -DBOOST_ALL_NO_LIB
